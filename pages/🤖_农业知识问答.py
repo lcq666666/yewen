@@ -1,6 +1,5 @@
 import copy
 import warnings
-from dataclasses import asdict
 from typing import Callable, List, Optional
 import streamlit as st
 import torch
@@ -8,8 +7,8 @@ from torch import nn
 from transformers.generation.utils import (LogitsProcessorList,
                                            StoppingCriteriaList)
 from transformers.utils import logging
-# 修改点1：引入官方 GenerationConfig
-from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig 
+# 核心修改1：引入官方 GenerationConfig，不再使用 dataclass 自定义
+from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig
 import base64
 
 logger = logging.get_logger(__name__)
@@ -25,8 +24,7 @@ def get_img_as_base64(file):
         data = f.read()
     return base64.b64encode(data).decode()
 
-# 修改点2：删除了自定义的 GenerationConfig dataclass，直接使用库自带的
-
+# 核心修改2：generate_interactive 函数逻辑调整，适配官方 GenerationConfig 对象
 @torch.inference_mode()
 def generate_interactive(
     model,
@@ -52,7 +50,7 @@ def generate_interactive(
     if generation_config is None:
         generation_config = model.generation_config
     
-    # 使用官方的 copy 方法
+    # 使用官方对象的 copy 方法
     generation_config = copy.deepcopy(generation_config)
     
     # 更新配置
@@ -79,11 +77,9 @@ def generate_interactive(
     elif generation_config.max_new_tokens is not None:
         generation_config.max_length = generation_config.max_new_tokens + input_ids_seq_length
 
-    # 2. Set generation parameters if not already defined
     logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
     stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
 
-    # 这里的调用之前报错，因为传入了错误的 config 对象
     logits_processor = model._get_logits_processor(
         generation_config=generation_config,
         input_ids_seq_length=input_ids_seq_length,
@@ -138,8 +134,7 @@ def generate_interactive(
         response = tokenizer.decode(output_token_ids)
 
         yield response
-        # stop when each sentence is finished
-        # or if we exceed the maximum length
+        
         if unfinished_sequences.max() == 0 or stopping_criteria(
                 input_ids, scores):
             break
@@ -151,12 +146,11 @@ def on_btn_click():
 
 @st.cache_resource(max_entries=10, ttl=3600)
 def load_model():
-    # 这里的路径保持你原本的 merge_model
+    # 确保路径正确指向你的 merge_model 文件夹
     model = AutoModelForCausalLM.from_pretrained("merge_model",
                                                 trust_remote_code=True, 
                                                 torch_dtype=torch.float32, 
                                                 device_map="auto")
-    # Tokenizer 路径保持 qwen/Qwen1.5-0.5B-Chat (或者也指向 merge_model 如果里面有 tokenizer 文件)
     tokenizer = AutoTokenizer.from_pretrained("qwen/Qwen1.5-0.5B-Chat", trust_remote_code=True)
     return model, tokenizer
 
@@ -166,13 +160,13 @@ def prepare_generation_config():
         top_p = st.slider('Top-p(累积概率)', 0.0, 1.0, 0.8, step=0.01)
         st.button('清除历史对话', on_click=on_btn_click)
 
-    # 修改点3：实例化官方 GenerationConfig，并手动设置参数
+    # 核心修改3：实例化官方 GenerationConfig，手动赋值参数
     generation_config = GenerationConfig()
     generation_config.max_length = 32768
     generation_config.top_p = top_p
     generation_config.do_sample = True
     generation_config.repetition_penalty = 1.005
-    # Qwen 的一些特定配置
+    # Qwen 特有配置
     generation_config.pad_token_id = 151643
     generation_config.eos_token_id = [151645, 151643]
 
@@ -227,11 +221,9 @@ def main():
     background-size: cover;
     }}
 
-    
     [data-testid="stBottom"] > div {{
         background: transparent;
     }}
-
     </style>
     '''
 
@@ -271,16 +263,13 @@ def main():
 
         with st.chat_message('robot', avatar=robot_avator):
             message_placeholder = st.empty()
-            # 将 generation_config 转为字典传入，避免类型冲突，或者直接传对象
-            # 这里 asdict 被移除了，因为官方 GenerationConfig 对象不是 dataclass
-            # 我们直接解包我们手动设置的参数，或者直接传对象给 generation_config 参数
             
-            # 修正调用方式
+            # 核心修改4：传递 generation_config 对象，移除 asdict 调用
             for cur_response in generate_interactive(
                     model=model,
                     tokenizer=tokenizer,
                     prompt=real_prompt,
-                    generation_config=generation_config, # 直接传入对象
+                    generation_config=generation_config,
                     additional_eos_token_id=92542,
             ):
                 message_placeholder.markdown(cur_response + '▌')
