@@ -1,6 +1,6 @@
 import copy
 import warnings
-from dataclasses import asdict, dataclass
+from dataclasses import asdict
 from typing import Callable, List, Optional
 import streamlit as st
 import torch
@@ -8,7 +8,8 @@ from torch import nn
 from transformers.generation.utils import (LogitsProcessorList,
                                            StoppingCriteriaList)
 from transformers.utils import logging
-from transformers import AutoTokenizer, AutoModelForCausalLM  
+# 修改点1：引入官方 GenerationConfig
+from transformers import AutoTokenizer, AutoModelForCausalLM, GenerationConfig 
 import base64
 
 logger = logging.get_logger(__name__)
@@ -24,15 +25,7 @@ def get_img_as_base64(file):
         data = f.read()
     return base64.b64encode(data).decode()
 
-
-@dataclass
-class GenerationConfig:
-    # this config is used for chat to provide more diversity
-    max_length: int = 32768
-    top_p: float = 0.8
-    do_sample: bool = True
-    repetition_penalty: float = 1.005
-
+# 修改点2：删除了自定义的 GenerationConfig dataclass，直接使用库自带的
 
 @torch.inference_mode()
 def generate_interactive(
@@ -50,15 +43,22 @@ def generate_interactive(
     inputs = tokenizer([prompt], padding=True, return_tensors='pt')
     input_length = len(inputs['input_ids'][0])
     for k, v in inputs.items():
+        # 如果你有GPU，请取消下面这行的注释
         # inputs[k] = v.cuda()
         inputs[k] = v
     input_ids = inputs['input_ids']
     _, input_ids_seq_length = input_ids.shape[0], input_ids.shape[-1]
+    
     if generation_config is None:
         generation_config = model.generation_config
+    
+    # 使用官方的 copy 方法
     generation_config = copy.deepcopy(generation_config)
+    
+    # 更新配置
     model_kwargs = generation_config.update(**kwargs)
-    bos_token_id, eos_token_id = (  # noqa: F841  # pylint: disable=W0612
+    
+    bos_token_id, eos_token_id = (
         generation_config.bos_token_id,
         generation_config.eos_token_id,
     )
@@ -66,46 +66,24 @@ def generate_interactive(
         eos_token_id = [eos_token_id]
     if additional_eos_token_id is not None:
         eos_token_id.append(additional_eos_token_id)
+        
     has_default_max_length = kwargs.get(
         'max_length') is None and generation_config.max_length is not None
+        
     if has_default_max_length and generation_config.max_new_tokens is None:
         warnings.warn(
-            f"Using 'max_length''s default ({repr(generation_config.max_length)}) \
-                to control the generation length. "
-            'This behaviour is deprecated and will be removed from the \
-                config in v5 of Transformers -- we'
-            ' recommend using `max_new_tokens` to control the maximum \
-                length of the generation.',
+            f"Using 'max_length''s default ({repr(generation_config.max_length)}) to control the generation length. "
+            "This behaviour is deprecated. recommend using `max_new_tokens`.",
             UserWarning,
         )
     elif generation_config.max_new_tokens is not None:
-        generation_config.max_length = generation_config.max_new_tokens + \
-            input_ids_seq_length
-        if not has_default_max_length:
-            logger.warn(  # pylint: disable=W4902
-                f"Both 'max_new_tokens' (={generation_config.max_new_tokens}) "
-                f"and 'max_length'(={generation_config.max_length}) seem to "
-                "have been set. 'max_new_tokens' will take precedence. "
-                'Please refer to the documentation for more information. '
-                '(https://huggingface.co/docs/transformers/main/'
-                'en/main_classes/text_generation)',
-                UserWarning,
-            )
-
-    if input_ids_seq_length >= generation_config.max_length:
-        input_ids_string = 'input_ids'
-        logger.warning(
-            f"Input length of {input_ids_string} is {input_ids_seq_length}, "
-            f"but 'max_length' is set to {generation_config.max_length}. "
-            'This can lead to unexpected behavior. You should consider'
-            " increasing 'max_new_tokens'.")
+        generation_config.max_length = generation_config.max_new_tokens + input_ids_seq_length
 
     # 2. Set generation parameters if not already defined
-    logits_processor = logits_processor if logits_processor is not None \
-        else LogitsProcessorList()
-    stopping_criteria = stopping_criteria if stopping_criteria is not None \
-        else StoppingCriteriaList()
+    logits_processor = logits_processor if logits_processor is not None else LogitsProcessorList()
+    stopping_criteria = stopping_criteria if stopping_criteria is not None else StoppingCriteriaList()
 
+    # 这里的调用之前报错，因为传入了错误的 config 对象
     logits_processor = model._get_logits_processor(
         generation_config=generation_config,
         input_ids_seq_length=input_ids_seq_length,
@@ -173,10 +151,12 @@ def on_btn_click():
 
 @st.cache_resource(max_entries=10, ttl=3600)
 def load_model():
+    # 这里的路径保持你原本的 merge_model
     model = AutoModelForCausalLM.from_pretrained("merge_model",
                                                 trust_remote_code=True, 
                                                 torch_dtype=torch.float32, 
                                                 device_map="auto")
+    # Tokenizer 路径保持 qwen/Qwen1.5-0.5B-Chat (或者也指向 merge_model 如果里面有 tokenizer 文件)
     tokenizer = AutoTokenizer.from_pretrained("qwen/Qwen1.5-0.5B-Chat", trust_remote_code=True)
     return model, tokenizer
 
@@ -186,7 +166,15 @@ def prepare_generation_config():
         top_p = st.slider('Top-p(累积概率)', 0.0, 1.0, 0.8, step=0.01)
         st.button('清除历史对话', on_click=on_btn_click)
 
-    generation_config = GenerationConfig(top_p=top_p)
+    # 修改点3：实例化官方 GenerationConfig，并手动设置参数
+    generation_config = GenerationConfig()
+    generation_config.max_length = 32768
+    generation_config.top_p = top_p
+    generation_config.do_sample = True
+    generation_config.repetition_penalty = 1.005
+    # Qwen 的一些特定配置
+    generation_config.pad_token_id = 151643
+    generation_config.eos_token_id = [151645, 151643]
 
     return generation_config
 
@@ -218,7 +206,6 @@ def main():
     Home = get_img_as_base64('images/bg.jpg')
     sidebar = get_img_as_base64('images/sidebar.jpg')
 
-
     page_bg_img=f'''
     <style>
     [data-testid="collapsedControl"] svg {{
@@ -249,7 +236,6 @@ def main():
     '''
 
     st.markdown(page_bg_img,unsafe_allow_html=True)
-    # torch.cuda.empty_cache()
     print('load model begin.')
     model, tokenizer = load_model()
     print('load model end.')
@@ -285,24 +271,26 @@ def main():
 
         with st.chat_message('robot', avatar=robot_avator):
             message_placeholder = st.empty()
+            # 将 generation_config 转为字典传入，避免类型冲突，或者直接传对象
+            # 这里 asdict 被移除了，因为官方 GenerationConfig 对象不是 dataclass
+            # 我们直接解包我们手动设置的参数，或者直接传对象给 generation_config 参数
+            
+            # 修正调用方式
             for cur_response in generate_interactive(
                     model=model,
                     tokenizer=tokenizer,
                     prompt=real_prompt,
+                    generation_config=generation_config, # 直接传入对象
                     additional_eos_token_id=92542,
-                    **asdict(generation_config),
             ):
-                # Display robot response in chat message container
                 message_placeholder.markdown(cur_response + '▌')
             message_placeholder.markdown(cur_response)
-        # Add robot response to chat history
+        
         st.session_state.messages.append({
             'role': 'robot',
-            'content': cur_response,  # pylint: disable=undefined-loop-variable
+            'content': cur_response, 
             'avatar': robot_avator,
         })
-        # torch.cuda.empty_cache()
-
 
 if __name__ == '__main__':
     main()
